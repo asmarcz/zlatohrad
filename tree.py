@@ -103,12 +103,15 @@ def socket_points(along):
     the half pad into the next hole. `along` maps the inward distance. It also
     reaches a tab length outside the board, to clear the rib that the pad's rib
     pattern leaves hanging over the edge there."""
+    # At depth L the socket is wider than the hole's flat there, so the flared
+    # walls carry on 2 mm into the hole; stopping at L would notch the bars.
     a, b, L = "TabBase / 2 + Fit", "TabEnd / 2 + Fit", "TabLen"
-    deep = add(L, "0.3")
+    deep = add(L, "2")
+    b_deep = f"{a} + ({b} - ({a})) * ({deep}) / ({L})"
     out = neg(add(L, "1"))
     local = [
-        (out, a), ("0", a), (L, b), (deep, b),
-        (deep, neg(b)), (L, neg(b)), ("0", neg(a)), (out, neg(a)),
+        (out, a), ("0", a), (deep, b_deep),
+        (deep, neg(b_deep)), ("0", neg(a)), (out, neg(a)),
     ]  # fmt: skip
     return [along(u, v) for u, v in local]
 
