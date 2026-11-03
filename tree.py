@@ -217,14 +217,24 @@ class Piece:
             "L": x0 == 0, "R": x1 == SIZE, "B": y0 == 0, "T": y1 == SIZE,
         }  # fmt: skip
 
-    def key(self):
-        # Same terminating sides and an even-tile offset give the same design.
-        return (tuple(sorted(self.term.items())), self.x0 % 4, self.y0 % 4)
+    def kind(self):
+        n = sum(self.term.values())
+        return {0: "Centre", 1: "Edge", 2: "Corner"}.get(n, "Piece")
 
-    def name(self):
-        sides = "".join(s for s in "BTLR" if self.term[s])
-        kind = {0: "Centre", 1: "Edge", 2: "Corner"}.get(len(sides), "Piece")
-        return kind + sides
+    def turned(self):
+        """This piece turned a quarter turn anticlockwise about the board centre."""
+        return Piece(SIZE - self.y1, SIZE - self.y0, self.x0, self.x1)
+
+    def signature(self):
+        """What makes a design: size, terminating sides, and where its tabs and
+        sockets are, relative to the piece's lower left corner."""
+        pads = set()
+        for side, c, tab in connectors(self):
+            x, y = {"R": (self.x1, c), "L": (self.x0, c),
+                    "T": (c, self.y1), "B": (c, self.y0)}[side]  # fmt: skip
+            pads.add((x - self.x0, y - self.y0, tab))
+        terms = frozenset(s for s, t in self.term.items() if t)
+        return (self.x1 - self.x0, self.y1 - self.y0, terms, frozenset(pads))
 
 
 def ribs(p):
@@ -339,10 +349,9 @@ def build_sheet(doc):
     return sheet
 
 
-def build_piece(doc, p):
-    body = doc.addObject("PartDesign::Body", p.name())
+def build_piece(doc, p, tag):
+    body = doc.addObject("PartDesign::Body", tag)
     origin = {f.Role: f for f in body.Origin.OriginFeatures}
-    tag = p.name()
 
     def sketch(name, points_list=(), plane="XY_Plane", offset=None):
         s = body.newObject("Sketcher::SketchObject", f"{tag}_{name}Sketch")
@@ -475,25 +484,53 @@ def build(doc):
         for j in range(len(ROWS) - 1)
         for i in range(len(COLS) - 1)
     ]
-    designs = {}
+    # A piece shares a design with an earlier one if that one, turned some
+    # quarter turns about the board centre and moved, has the same tabs,
+    # sockets and edges in the same places.
+    designs = []  # (first piece, [(piece, quarter turns, first piece so turned)])
     for p in pieces:
-        designs.setdefault(p.key(), []).append(p)
-    names = [group[0].name() for group in designs.values()]
-    assert len(set(names)) == len(names), names
-    remove_old(doc, names)
+        for first, members in designs:
+            t = first
+            for k in range(4):
+                if t.signature() == p.signature():
+                    members.append((p, k, t))
+                    break
+                t = t.turned()
+            else:
+                continue
+            break
+        else:
+            designs.append((p, [(p, 0, p)]))
+
+    names, seen = [], {}
+    for first, _ in designs:
+        kind = first.kind()
+        seen[kind] = seen.get(kind, 0) + 1
+        names.append(kind if seen[kind] == 1 else f"{kind}{seen[kind]}")
+    # Names used by earlier versions of this script, so reruns clean them up.
+    legacy = ["CornerBL", "CornerBR", "CornerTL", "CornerTR",
+              "EdgeB", "EdgeT", "EdgeL", "EdgeR"]  # fmt: skip
+    remove_old(doc, names + legacy)
 
     sheet = build_sheet(doc)
     layout = doc.addObject("App::DocumentObjectGroup", "Layout")
     bodies = []
-    for group in designs.values():
-        first = group[0]
-        body = build_piece(doc, first)
+    centre = SIZE / 4  # board centre, in tiles
+    for name, (first, members) in zip(names, designs):
+        body = build_piece(doc, first, name)
         bodies.append(body)
-        for k, p in enumerate(group[1:], start=2):
-            link = doc.addObject("App::Link", f"{first.name()}_{k}")
+        for n, (p, k, t) in enumerate(members[1:], start=2):
+            link = doc.addObject("App::Link", f"{name}_{n}")
             link.LinkedObject = body
-            link.setExpression(".Placement.Base.x", f"{(p.x0 - first.x0) / 2:g} * Params.Pitch")
-            link.setExpression(".Placement.Base.y", f"{(p.y0 - first.y0) / 2:g} * Params.Pitch")
+            # Turn about the board centre, then move from where the turn lands
+            # the piece (t) to where it belongs (p). As a placement that is the
+            # turn about the origin plus this offset, in tiles.
+            cos, sin = [(1, 0), (0, 1), (-1, 0), (0, -1)][k]
+            dx = centre - (cos * centre - sin * centre) + (p.x0 - t.x0) / 2
+            dy = centre - (sin * centre + cos * centre) + (p.y0 - t.y0) / 2
+            link.Placement = App.Placement(V(), App.Rotation(V(0, 0, 1), 90 * k))
+            link.setExpression(".Placement.Base.x", f"{dx:g} * Params.Pitch")
+            link.setExpression(".Placement.Base.y", f"{dy:g} * Params.Pitch")
             layout.addObject(link)
     return sheet, bodies, layout
 
