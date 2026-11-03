@@ -121,6 +121,40 @@ def rib_section(sketch, cu):
     sketch.setExpression(f".Constraints[{i}]", expr(w))
 
 
+def rib_end_cut(sketch, end, sign):
+    """Side view of what to cut off one rib end so it curves down to the board in
+    a quarter circle of radius RibH. `end` is where the rib ends along sketch x,
+    `sign` is +1 if the rib lies towards -x from there, -1 if towards +x."""
+    r, base = "RibH", "Thickness"
+    step = add if sign > 0 else sub  # away from the rib
+    out = step(end, "1")  # a bit past the end, where there is no rib
+    centre = sub(end, r) if sign > 0 else add(end, r)
+    above = f"{base} + {r} + 1"
+    p = lambda x, y: V(num(x), num(y), 0)
+    g = len(sketch.Geometry)
+    # A (over the arc top) -> B -> C (past the end, on the board) -> D (rib end)
+    sketch.addGeometry(Part.LineSegment(p(centre, f"{base} + {r}"), p(centre, above)))
+    sketch.addGeometry(Part.LineSegment(p(centre, above), p(out, above)))
+    sketch.addGeometry(Part.LineSegment(p(out, above), p(out, base)))
+    sketch.addGeometry(Part.LineSegment(p(out, base), p(end, base)))
+    circle = Part.Circle(p(centre, base), V(0, 0, 1), num(r))
+    a0, a1 = (0, math.pi / 2) if sign > 0 else (math.pi / 2, math.pi)
+    sketch.addGeometry(Part.ArcOfCircle(circle, a0, a1))
+    up, over, down, back, arc = g, g + 1, g + 2, g + 3, g + 4
+    # Arc start/end: at the rib end (on the board) and at the top, in either order.
+    at_end, at_top = (1, 2) if sign > 0 else (2, 1)
+    for a, pa, b, pb in ((up, 2, over, 1), (over, 2, down, 1), (down, 2, back, 1),
+                         (back, 2, arc, at_end), (arc, at_top, up, 1)):  # fmt: skip
+        sketch.addConstraint(Sketcher.Constraint("Coincident", a, pa, b, pb))
+    for x, y, geo, pos in ((centre, above, up, 2), (out, above, over, 2),
+                           (out, base, down, 2), (end, base, back, 2)):  # fmt: skip
+        fix(sketch, "DistanceX", geo, pos, x)
+        fix(sketch, "DistanceY", geo, pos, y)
+    fix(sketch, "DistanceX", arc, 3, centre)
+    fix(sketch, "DistanceY", arc, 3, base)
+    sketch.addConstraint(Sketcher.Constraint("Vertical", up))
+
+
 def tab_points(along):
     """Dovetail sticking out of the board. `along` maps the outward distance and
     the sideways offset to (x, y) expression strings."""
@@ -264,6 +298,17 @@ def build(doc):
     s = sketch("XRibSketch", [], plane=origin["YZ_Plane"], offset="-1.5 * Pitch")
     rib_section(s, "-Pitch")
     grid("XRibs", pad("XRib", s, "Params.PadSize", both_ways=True), 4, 3)
+
+    # Rounded rib ends: a side-view cut through everything above the board,
+    # both ways, so one row of cuts trims every rib whose ends line up with it.
+    def rib_ends(name, plane, c, nx, ny):
+        s = sketch(name + "Sketch", [], plane=plane)
+        rib_end_cut(s, add(c, "PadSize / 2"), +1)
+        rib_end_cut(s, sub(c, "PadSize / 2"), -1)
+        grid(name + "s", pocket(name, s, both_ways=True), nx, ny)
+
+    rib_ends("YRibEnd", origin["YZ_Plane"], "-1.5 * Pitch", 1, 4)
+    rib_ends("XRibEnd", origin["XZ_Plane"], "-1.5 * Pitch", 4, 1)
 
     pts = [
         socket_points(lambda u, v, cy=cy: (sub("Half", u), add(cy, v)))
