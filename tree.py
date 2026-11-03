@@ -83,11 +83,42 @@ def poly(sketch, points):
             Sketcher.Constraint("Coincident", first + k, 2, first + (k + 1) % n, 1)
         )
     for k, (x, y) in enumerate(points):
-        for kind, e in (("DistanceX", x), ("DistanceY", y)):
-            i = sketch.addConstraint(
-                Sketcher.Constraint(kind, -1, 1, first + k, 1, num(e))
-            )
-            sketch.setExpression(f".Constraints[{i}]", expr(e))
+        fix(sketch, "DistanceX", first + k, 1, x)
+        fix(sketch, "DistanceY", first + k, 1, y)
+
+
+def fix(sketch, kind, geo, pos, e):
+    """Pin one coordinate of a sketch point to an expression."""
+    i = sketch.addConstraint(Sketcher.Constraint(kind, -1, 1, geo, pos, num(e)))
+    sketch.setExpression(f".Constraints[{i}]", expr(e))
+
+
+def rib_section(sketch, cu):
+    """Cross-section of a rib centred on sketch x = cu: straight sides standing on
+    the board's top face and a fully rounded top, so it is gentle on fingers."""
+    w, h, base = "RibW / 2", "RibH", "Thickness"
+    shoulder = f"{base} + {h} - ({w})"  # where the sides meet the round top
+    p = lambda x, y: V(num(x), num(y), 0)
+    g = len(sketch.Geometry)
+    sketch.addGeometry(Part.LineSegment(p(sub(cu, w), base), p(add(cu, w), base)))
+    sketch.addGeometry(Part.LineSegment(p(add(cu, w), base), p(add(cu, w), shoulder)))
+    circle = Part.Circle(p(cu, shoulder), V(0, 0, 1), num(w))
+    sketch.addGeometry(Part.ArcOfCircle(circle, 0, math.pi))
+    sketch.addGeometry(Part.LineSegment(p(sub(cu, w), shoulder), p(sub(cu, w), base)))
+    bottom, right, top, left = g, g + 1, g + 2, g + 3
+    sketch.addConstraint(Sketcher.Constraint("Coincident", bottom, 2, right, 1))
+    sketch.addConstraint(Sketcher.Constraint("Coincident", left, 2, bottom, 1))
+    # The sides join the arc tangentially, which also makes them vertical.
+    sketch.addConstraint(Sketcher.Constraint("Tangent", right, 2, top, 1))
+    sketch.addConstraint(Sketcher.Constraint("Tangent", top, 2, left, 1))
+    fix(sketch, "DistanceX", bottom, 1, sub(cu, w))
+    fix(sketch, "DistanceY", bottom, 1, base)
+    fix(sketch, "DistanceX", bottom, 2, add(cu, w))
+    fix(sketch, "DistanceY", bottom, 2, base)
+    fix(sketch, "DistanceX", top, 3, cu)
+    fix(sketch, "DistanceY", top, 3, shoulder)
+    i = sketch.addConstraint(Sketcher.Constraint("Radius", top, num(w)))
+    sketch.setExpression(f".Constraints[{i}]", expr(w))
 
 
 def tab_points(along):
@@ -154,24 +185,28 @@ def build(doc):
     doc.recompute()
 
     body = doc.addObject("PartDesign::Body", "Board")
-    xy = body.Origin.OriginFeatures[3]  # XY_Plane
-    assert xy.Role == "XY_Plane", xy.Role
+    origin = {f.Role: f for f in body.Origin.OriginFeatures}
+    xy = origin["XY_Plane"]
 
-    def sketch(name, points_list, top=False):
+    def sketch(name, points_list, top=False, plane=xy, offset=None):
         s = body.newObject("Sketcher::SketchObject", name)
-        s.AttachmentSupport = [(xy, "")]
+        s.AttachmentSupport = [(plane, "")]
         s.MapMode = "FlatFace"
         if top:
-            # On the top face: ribs grow up from it, cuts go down from it.
-            s.setExpression(".AttachmentOffset.Base.z", "Params.Thickness")
+            # On the top face: cuts go down from it.
+            offset = "Thickness"
+        if offset:
+            # Moves the sketch along its own normal.
+            s.setExpression(".AttachmentOffset.Base.z", expr(offset))
         for pts in points_list:
             poly(s, pts)
         return s
 
-    def pad(name, s, length="Params.Thickness"):
+    def pad(name, s, length="Params.Thickness", both_ways=False):
         f = body.newObject("PartDesign::Pad", name)
         f.Profile = s
         f.setExpression("Length", length)
+        f.Midplane = both_ways
         return f
 
     def pocket(name, s, both_ways=False):
@@ -189,12 +224,13 @@ def build(doc):
         body.Tip = m  # patterns don't take the tip themselves; the next feature must follow them
         return m
 
-    def grid(name, feature, s, nx, ny):
+    def grid(name, feature, nx, ny):
+        # nx copies along +x and ny along +y, one pitch apart.
         g = body.newObject("PartDesign::LinearPattern", name)
         g.Originals = [feature]
         g.Mode = g.Mode2 = "Extent"
-        g.Direction = (s, ["H_Axis"])
-        g.Direction2 = (s, ["V_Axis"])
+        g.Direction = (origin["X_Axis"], [""])
+        g.Direction2 = (origin["Y_Axis"], [""])
         g.setExpression("Length", f"{nx - 1} * Params.Pitch")
         g.setExpression("Length2", f"{ny - 1} * Params.Pitch")
         g.Occurrences, g.Occurrences2 = nx, ny
@@ -218,10 +254,16 @@ def build(doc):
     # tip, completing the rib over the neighbour's half pad. They come before the
     # sockets, which cut away the ribs of the half pads they replace.
     # Seams between tiles side by side run along y, seams between stacked tiles along x.
-    s = sketch("YRibSketch", [rect_points("-Pitch", "-1.5 * Pitch", "RibW / 2", "PadSize / 2")], top=True)
-    grid("YRibs", pad("YRib", s, "Params.RibH"), s, 3, 4)
-    s = sketch("XRibSketch", [rect_points("-1.5 * Pitch", "-Pitch", "PadSize / 2", "RibW / 2")], top=True)
-    grid("XRibs", pad("XRib", s, "Params.RibH"), s, 4, 3)
+    # Each rib is its cross-section, drawn on a vertical plane through the rib's
+    # centre and padded PadSize along the seam, half each way.
+    # XZ_Plane: sketch x = global x, its normal points to -y.
+    s = sketch("YRibSketch", [], plane=origin["XZ_Plane"], offset="1.5 * Pitch")
+    rib_section(s, "-Pitch")
+    grid("YRibs", pad("YRib", s, "Params.PadSize", both_ways=True), 3, 4)
+    # YZ_Plane: sketch x = global y, its normal points to +x.
+    s = sketch("XRibSketch", [], plane=origin["YZ_Plane"], offset="-1.5 * Pitch")
+    rib_section(s, "-Pitch")
+    grid("XRibs", pad("XRib", s, "Params.PadSize", both_ways=True), 4, 3)
 
     pts = [
         socket_points(lambda u, v, cy=cy: (sub("Half", u), add(cy, v)))
@@ -234,9 +276,9 @@ def build(doc):
     mirror("EndSockets", pocket("EndSocket", s, both_ways=True), s, "H_Axis")
 
     s = sketch("CornerHoleSketch", [octagon_points("-Pitch", "-Pitch")], top=True)
-    grid("CornerHoles", pocket("CornerHole", s), s, 3, 3)
+    grid("CornerHoles", pocket("CornerHole", s), 3, 3)
     s = sketch("CentreHoleSketch", [octagon_points("-1.5 * Pitch", "-1.5 * Pitch")], top=True)
-    last = grid("CentreHoles", pocket("CentreHole", s), s, 4, 4)
+    last = grid("CentreHoles", pocket("CentreHole", s), 4, 4)
     last.Refine = True
 
     return sheet, body
