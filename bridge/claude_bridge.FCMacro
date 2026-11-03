@@ -1,0 +1,116 @@
+# Lets an outside process run Python inside this FreeCAD session.
+# Run once to start the server, run again to stop it.
+# Listens on 127.0.0.1 only. Code runs on the GUI thread, and each call is
+# one undo step ("Claude") in the document that was active when it started.
+
+import contextlib
+import io
+import queue
+import threading
+import traceback
+import xmlrpc.client
+from xmlrpc.server import SimpleXMLRPCServer
+
+import FreeCAD as App
+import FreeCADGui as Gui
+from PySide import QtCore
+
+HOST, PORT = "127.0.0.1", 9876
+TIMEOUT = 300  # seconds an outside call waits for the GUI thread
+
+
+def _marshallable(value):
+    try:
+        xmlrpc.client.dumps((value,), allow_none=True)
+        return value
+    except Exception:
+        return repr(value)
+
+
+class Bridge:
+    def __init__(self):
+        self.jobs = queue.Queue()
+        # Shared between calls, so variables survive from one call to the next.
+        self.ns = {"App": App, "FreeCAD": App, "Gui": Gui, "FreeCADGui": Gui}
+
+        self.server = SimpleXMLRPCServer(
+            (HOST, PORT), allow_none=True, logRequests=False
+        )
+        self.server.register_function(self._remote(self._run), "run")
+        self.server.register_function(self._remote(self._screenshot), "screenshot")
+        self.server.register_function(lambda: "pong", "ping")
+
+        # The GUI thread picks up queued jobs on this timer.
+        self.timer = QtCore.QTimer()
+        self.timer.timeout.connect(self._drain)
+        self.timer.start(30)
+
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.timer.stop()
+
+    # Called on the server thread: hand the job to the GUI thread and wait.
+    def _remote(self, fn):
+        def call(*args):
+            done = threading.Event()
+            box = {}
+            self.jobs.put((fn, args, box, done))
+            if not done.wait(TIMEOUT):
+                return {"ok": False, "error": "timed out waiting for the GUI thread"}
+            return box["value"]
+
+        return call
+
+    # Called on the GUI thread.
+    def _drain(self):
+        while True:
+            try:
+                fn, args, box, done = self.jobs.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                box["value"] = fn(*args)
+            except Exception:
+                box["value"] = {"ok": False, "error": traceback.format_exc()}
+            done.set()
+
+    def _run(self, code):
+        out = io.StringIO()
+        doc = App.ActiveDocument
+        if doc:
+            doc.openTransaction("Claude")
+        ok, err = True, ""
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                exec(compile(code, "<claude>", "exec"), self.ns)
+        except Exception:
+            ok, err = False, traceback.format_exc()
+        finally:
+            # The code may have closed the document.
+            if doc and doc.Name in App.listDocuments():
+                doc.commitTransaction()
+        result = self.ns.pop("result", None)
+        return {
+            "ok": ok,
+            "output": out.getvalue(),
+            "error": err,
+            "result": _marshallable(result),
+        }
+
+    def _screenshot(self, path, width=1600, height=1000):
+        view = Gui.ActiveDocument.ActiveView
+        view.saveImage(path, int(width), int(height), "Current")
+        return {"ok": True, "result": path}
+
+
+if getattr(App, "_claude_bridge", None):
+    App._claude_bridge.stop()
+    App._claude_bridge = None
+    App.Console.PrintMessage("Claude bridge stopped\n")
+else:
+    App._claude_bridge = Bridge()
+    App.Console.PrintMessage(f"Claude bridge listening on {HOST}:{PORT}\n")
