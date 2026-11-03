@@ -6,7 +6,8 @@
 # Layout, with the board centre on a tile corner:
 #   tile centres at ((i+1/2)P, (j+1/2)P), tile corners at (iP, jP)
 #   an octagonal hole sits on every tile centre and every tile corner
-#   a square pad sits on every tile edge midpoint, with a groove along the seam
+#   a square pad sits on every tile edge midpoint, with a raised rib along the
+#   seam that keeps the tiles from sliding
 #   the board outline runs through the centres of the outer tiles (+-1.5P)
 # Edge connectors: left/right have a dovetail tab in the middle and sockets at
 # +-P; top/bottom have tabs at +-P and a socket in the middle.
@@ -24,8 +25,10 @@ V = App.Vector
 # (alias, value or =formula, note)
 PARAMS = [
     ("Tile", "52", "side of the square tiles"),
-    ("Gap", "0.5", "space between neighbouring tiles"),
-    ("Pitch", "=Tile + Gap", "tile pitch"),
+    ("RibW", "1.2", "width of the separator ribs between tiles"),
+    ("RibH", "2", "how far the ribs stand above the board"),
+    ("TileFit", "0.25", "play between a tile and each rib"),
+    ("Pitch", "=Tile + RibW + 2 * TileFit", "tile pitch"),
     ("Thickness", "3", "board thickness"),
     ("PadSize", "20", "side of the square pads under the tile edges"),
     ("Bar", "5.5", "width of the diagonal bars"),
@@ -33,8 +36,6 @@ PARAMS = [
     ("TabEnd", "13", "dovetail width at its tip"),
     ("TabLen", "=PadSize / 2", "dovetail length: fills the neighbour's half pad"),
     ("Fit", "0.2", "clearance around the dovetail in the socket"),
-    ("GrooveW", "0.6", "seam groove width"),
-    ("GrooveD", "0.4", "seam groove depth"),
     ("Half", "=1.5 * Pitch", "half the board side, without tabs"),
     ("OctH", "=Pitch / 2 - PadSize / 2", "hole centre to the flats facing the pads"),
     ("OctC", "=PadSize / 2 - Bar / sqrt(2)", "half length of those flats"),
@@ -99,12 +100,15 @@ def tab_points(along):
 
 def socket_points(along):
     """Socket into the board, Fit wider than the tab on each side, running through
-    the half pad into the next hole. `along` maps the inward distance."""
+    the half pad into the next hole. `along` maps the inward distance. It also
+    reaches a tab length outside the board, to clear the rib that the pad's rib
+    pattern leaves hanging over the edge there."""
     a, b, L = "TabBase / 2 + Fit", "TabEnd / 2 + Fit", "TabLen"
     deep = add(L, "0.3")
+    out = neg(add(L, "1"))
     local = [
-        ("-1", a), ("0", a), (L, b), (deep, b),
-        (deep, neg(b)), (L, neg(b)), ("0", neg(a)), ("-1", neg(a)),
+        (out, a), ("0", a), (L, b), (deep, b),
+        (deep, neg(b)), (L, neg(b)), ("0", neg(a)), (out, neg(a)),
     ]  # fmt: skip
     return [along(u, v) for u, v in local]
 
@@ -155,25 +159,24 @@ def build(doc):
         s.AttachmentSupport = [(xy, "")]
         s.MapMode = "FlatFace"
         if top:
-            # Cutting sketches sit on the top face and cut downward.
+            # On the top face: ribs grow up from it, cuts go down from it.
             s.setExpression(".AttachmentOffset.Base.z", "Params.Thickness")
         for pts in points_list:
             poly(s, pts)
         return s
 
-    def pad(name, s):
+    def pad(name, s, length="Params.Thickness"):
         f = body.newObject("PartDesign::Pad", name)
         f.Profile = s
-        f.setExpression("Length", "Params.Thickness")
+        f.setExpression("Length", length)
         return f
 
-    def pocket(name, s, depth=None):
+    def pocket(name, s, both_ways=False):
+        # Through everything below the sketch, and above it too if both_ways.
         f = body.newObject("PartDesign::Pocket", name)
         f.Profile = s
-        if depth is None:
-            f.Type = "ThroughAll"
-        else:
-            f.setExpression("Length", depth)
+        f.Type = "ThroughAll"
+        f.Midplane = both_ways
         return f
 
     def mirror(name, feature, s, axis):
@@ -208,22 +211,24 @@ def build(doc):
     s = sketch("EndTabSketch", pts)
     mirror("EndTabs", pad("EndTab", s), s, "H_Axis")
 
-    # Grooves come before the sockets so every groove still has material to cut.
+    # Separator ribs along the seams, one per pad. On the tabs they run on to the
+    # tip, completing the rib over the neighbour's half pad. They come before the
+    # sockets, which cut away the ribs of the half pads they replace.
     # Seams between tiles side by side run along y, seams between stacked tiles along x.
-    s = sketch("YGrooveSketch", [rect_points("-Pitch", "-1.5 * Pitch", "GrooveW / 2", "PadSize / 2")], top=True)
-    grid("YGrooves", pocket("YGroove", s, "Params.GrooveD"), s, 3, 4)
-    s = sketch("XGrooveSketch", [rect_points("-1.5 * Pitch", "-Pitch", "PadSize / 2", "GrooveW / 2")], top=True)
-    grid("XGrooves", pocket("XGroove", s, "Params.GrooveD"), s, 4, 3)
+    s = sketch("YRibSketch", [rect_points("-Pitch", "-1.5 * Pitch", "RibW / 2", "PadSize / 2")], top=True)
+    grid("YRibs", pad("YRib", s, "Params.RibH"), s, 3, 4)
+    s = sketch("XRibSketch", [rect_points("-1.5 * Pitch", "-Pitch", "PadSize / 2", "RibW / 2")], top=True)
+    grid("XRibs", pad("XRib", s, "Params.RibH"), s, 4, 3)
 
     pts = [
         socket_points(lambda u, v, cy=cy: (sub("Half", u), add(cy, v)))
         for cy in ("Pitch", "-Pitch")
     ]
     s = sketch("SideSocketSketch", pts, top=True)
-    mirror("SideSockets", pocket("SideSocket", s), s, "V_Axis")
+    mirror("SideSockets", pocket("SideSocket", s, both_ways=True), s, "V_Axis")
 
     s = sketch("EndSocketSketch", [socket_points(lambda u, v: (v, sub("Half", u)))], top=True)
-    mirror("EndSockets", pocket("EndSocket", s), s, "H_Axis")
+    mirror("EndSockets", pocket("EndSocket", s, both_ways=True), s, "H_Axis")
 
     s = sketch("CornerHoleSketch", [octagon_points("-Pitch", "-Pitch")], top=True)
     grid("CornerHoles", pocket("CornerHole", s), s, 3, 3)
