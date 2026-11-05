@@ -45,7 +45,8 @@ PARAMS = [
     ("Bar", "5.5", "width of the diagonal bars"),
     ("Border", "5", "solid strip along the board's outer edges"),
     ("KnobNeck", "5", "width of the jigsaw tab's neck at the piece edge"),
-    ("KnobHead", "9", "diameter of the jigsaw tab's round head"),
+    ("KnobHead", "10", "width of the jigsaw tab's oval head, across the tab"),
+    ("KnobLen", "6", "length of the oval head along the tab; at most KnobHead"),
     ("KnobReach", "=PadSize / 2 - 1", "how far the tab reaches into the neighbour; the rest is the socket's back wall"),
     ("Fit", "0.2", "clearance around the dovetail in the socket"),
     ("OctH", "=Pitch / 2 - PadSize / 2", "hole centre to the flats facing the pads"),
@@ -281,32 +282,52 @@ def ridge_top_cut(sketch):
 
 
 def knob(sketch, along, fit, inner):
-    """Jigsaw knob: a neck of width KnobNeck from the piece edge into a round
-    head of diameter KnobHead whose tip is KnobReach from the edge. `along` maps
-    (u, v) = (distance across the edge, offset along it) to (x, y) expressions;
-    `fit` widens everything by that much on each side (for the socket); the
-    neck starts `inner` behind the edge so the shape overlaps what it joins."""
+    """Jigsaw knob: a neck of width KnobNeck from the piece edge into an oval
+    head KnobHead wide (across the tab) and KnobLen long (along it), whose tip
+    is KnobReach from the edge. An oval locks as well as a round head of the
+    same width but takes less length, leaving a thicker wall behind the socket.
+    `along` maps (u, v) = (distance across the edge, offset along it) to (x, y)
+    expressions; `fit` widens everything by that much on each side (for the
+    socket); the neck starts `inner` behind the edge so it overlaps what it joins."""
     a = f"KnobNeck / 2 + {fit}"
-    r = f"KnobHead / 2 + {fit}"
-    c = "KnobReach - KnobHead / 2"  # head centre, distance from the edge
-    u1 = f"{c} - sqrt(({r}) * ({r}) - ({a}) * ({a}))"  # where the neck meets the head
+    wide = f"KnobHead / 2 + {fit}"  # semi-axis across the tab
+    long = f"KnobLen / 2 + {fit}"  # semi-axis along it
+    c = "KnobReach - KnobLen / 2"  # head centre, distance from the edge
+    # Where the neck meets the head: the oval is `a` wide there.
+    u1 = f"{c} - ({long}) * sqrt(1 - ({a}) * ({a}) / (({wide}) * ({wide})))"
     pa, pb = along(neg(inner), a), along(neg(inner), neg(a))
     pt, pbot = along(u1, a), along(u1, neg(a))
-    tip, centre = along(add(c, r), "0"), along(c, "0")
+    tip, centre = along(add(c, long), "0"), along(c, "0")
     p = lambda q: V(num(q[0]), num(q[1]), 0)
     g = len(sketch.Geometry)
     sketch.addGeometry(Part.LineSegment(p(pa), p(pt)))
-    # Sketcher arcs run anticlockwise; pick the start so the arc passes the tip.
+    # Sketcher needs the major axis as the longer one; either may be across.
     cv = p(centre)
-    ang = lambda q: math.atan2(num(q[1]) - cv.y, num(q[0]) - cv.x)
-    tb, tt, tp = ang(pbot), ang(pt), ang(tip)
+    across_dir = (p(along("0", "1")) - p(along("0", "0"))).normalize()
+    along_dir = (p(along("1", "0")) - p(along("0", "0"))).normalize()
+    across_major = num(wide) >= num(long)
+    major, minor = (wide, long) if across_major else (long, wide)
+    major_dir = across_dir if across_major else along_dir
+    minor_dir = V(0, 0, 1).cross(major_dir)  # keeps the ellipse anticlockwise
+    oval = Part.Ellipse(cv + major_dir * num(major), cv + minor_dir * num(minor), cv)
+
+    def param(q):
+        d = p(q) - cv
+        return math.atan2(d.dot(minor_dir) / num(minor), d.dot(major_dir) / num(major))
+
+    # Sketcher arcs run anticlockwise; pick the start so the arc passes the tip.
+    tb, tt, tp = param(pbot), param(pt), param(tip)
     ccw = lambda a, b: (b - a) % (2 * math.pi)
     a0, a1 = (tb, tt) if ccw(tb, tp) < ccw(tb, tt) else (tt, tb)
     a1 = a0 + ccw(a0, a1)
-    sketch.addGeometry(Part.ArcOfCircle(Part.Circle(cv, V(0, 0, 1), num(r)), a0, a1))
+    sketch.addGeometry(Part.ArcOfEllipse(oval, a0, a1))
     sketch.addGeometry(Part.LineSegment(p(pbot), p(pb)))
     sketch.addGeometry(Part.LineSegment(p(pb), p(pa)))
     top, head, bottom, back = g, g + 1, g + 2, g + 3
+    # Construction lines along the oval's axes, which take its size and turn.
+    n = len(sketch.Geometry)
+    sketch.exposeInternalGeometry(head)
+    major_line, minor_line = n, n + 1
     # Sketcher keeps arcs anticlockwise, so either end may be the start.
     stored = sketch.Geometry[head]
     at_top = 1 if (stored.StartPoint - p(pt)).Length < 1e-6 else 2
@@ -320,8 +341,11 @@ def knob(sketch, along, fit, inner):
         fix(sketch, "DistanceY", geo, pos, q[1])
     fix(sketch, "DistanceX", head, 3, centre[0])
     fix(sketch, "DistanceY", head, 3, centre[1])
-    i = sketch.addConstraint(Sketcher.Constraint("Radius", head, num(r)))
-    sketch.setExpression(f".Constraints[{i}]", expr(r))
+    for line, semi in ((major_line, major), (minor_line, minor)):
+        i = sketch.addConstraint(Sketcher.Constraint("Distance", line, 2 * num(semi)))
+        sketch.setExpression(f".Constraints[{i}]", expr(f"2 * ({semi})"))
+    horizontal = abs(major_dir.y) < 1e-9
+    sketch.addConstraint(Sketcher.Constraint("Horizontal" if horizontal else "Vertical", major_line))
     # The neck sides run straight across the edge until they meet the head.
     straight = "Horizontal" if abs(num(pa[1]) - num(pt[1])) < 1e-6 else "Vertical"
     sketch.addConstraint(Sketcher.Constraint(straight, top))
@@ -387,7 +411,7 @@ class Piece:
 
 
 # Distance from the piece edge to where the knob's head is exactly RibW wide.
-RIB_ON_KNOB = "KnobReach - KnobHead / 2 + sqrt(KnobHead * KnobHead / 4 - RibW * RibW / 4)"
+RIB_ON_KNOB = "KnobReach - KnobLen / 2 + KnobLen / 2 * sqrt(1 - RibW * RibW / (KnobHead * KnobHead))"
 
 
 def ribs(p):
@@ -828,7 +852,13 @@ only = globals().pop("ONLY", None)  # popped so it doesn't stick to later runs
 doc = App.ActiveDocument
 sheet, bodies, layout = build(doc, only)
 start = time.time()
-doc.recompute()
+# Skip Recomputes would make this a no-op; lift it for the rebuild, then restore.
+frozen = doc.RecomputesFrozen
+doc.RecomputesFrozen = False
+try:
+    doc.recompute()
+finally:
+    doc.RecomputesFrozen = frozen
 elapsed = time.time() - start
 
 report = {}
