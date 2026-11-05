@@ -1,2 +1,5 @@
 *.FCBak
 __pycache__/
+# Exports and the FreeCAD model are published as GitHub release assets instead.
+assets/
+*.FCStd
