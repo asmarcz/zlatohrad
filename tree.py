@@ -54,9 +54,28 @@ PARAMS = [
 ALIASES = [a for a, _, _ in PARAMS]
 NAME = re.compile(r"\b(" + "|".join(ALIASES) + r")\b")
 
+# Numbers behind each alias, for placing sketch geometry near its final shape
+# before the expressions take over. Filled from the sheet contents in build().
 values = {"sqrt": math.sqrt}
-for alias, value, _ in PARAMS:
-    values[alias] = eval(value.lstrip("="), {}, values)
+
+
+def set_values(contents):
+    for alias, _, _ in PARAMS:
+        values[alias] = eval(contents[alias].lstrip("="), {}, values)
+
+
+def read_sheet(doc):
+    """Cell contents of an existing Params sheet, by alias, so a rebuild keeps
+    the values set there instead of resetting them to the defaults above."""
+    sheet = doc.getObject("Params")
+    if sheet is None:
+        return {}
+    found = {}
+    for alias in ALIASES:
+        cell = sheet.getCellFromAlias(alias)
+        if cell:
+            found[alias] = sheet.getContents(cell)
+    return found
 
 
 def expr(e):
@@ -338,11 +357,11 @@ def remove_old(doc, names):
             doc.removeObject(obj.Name)
 
 
-def build_sheet(doc):
+def build_sheet(doc, contents):
     sheet = doc.addObject("Spreadsheet::Sheet", "Params")
-    for row, (alias, value, note) in enumerate(PARAMS, start=1):
+    for row, (alias, _, note) in enumerate(PARAMS, start=1):
         sheet.set(f"A{row}", alias)
-        sheet.set(f"B{row}", value)
+        sheet.set(f"B{row}", contents[alias])
         sheet.setAlias(f"B{row}", alias)
         sheet.set(f"C{row}", note)
     doc.recompute()
@@ -510,9 +529,14 @@ def build(doc):
     # Names used by earlier versions of this script, so reruns clean them up.
     legacy = ["CornerBL", "CornerBR", "CornerTL", "CornerTR",
               "EdgeB", "EdgeT", "EdgeL", "EdgeR"]  # fmt: skip
+    defaults = {a: v for a, v, _ in PARAMS}
+    existing = read_sheet(doc)
+    contents = {a: existing.get(a, v) for a, v in defaults.items()}
+    set_values(contents)
+    kept.update({a: c for a, c in contents.items() if c != defaults[a]})
     remove_old(doc, names + legacy)
 
-    sheet = build_sheet(doc)
+    sheet = build_sheet(doc, contents)
     layout = doc.addObject("App::DocumentObjectGroup", "Layout")
     bodies = []
     centre = SIZE / 4  # board centre, in tiles
@@ -535,6 +559,7 @@ def build(doc):
     return sheet, bodies, layout
 
 
+kept = {}  # values taken over from the existing sheet that differ from the defaults
 doc = App.ActiveDocument
 sheet, bodies, layout = build(doc)
 start = time.time()
@@ -559,7 +584,7 @@ for body in bodies:
         "solids": len(shape.Solids),
         "size": [round(bb.XLength, 1), round(bb.YLength, 1)],
     }
-result = {"recompute_s": round(elapsed, 1), "pieces": report}
+result = {"recompute_s": round(elapsed, 1), "kept_from_sheet": kept, "pieces": report}
 
 try:
     import FreeCADGui as Gui
