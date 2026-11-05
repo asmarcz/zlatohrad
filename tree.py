@@ -413,7 +413,7 @@ def lattice(lo, hi, odd):
 
 
 def remove_old(doc, names):
-    for name in ["Layout"] + names + ["Board", "Params"]:
+    for name in names:
         obj = doc.getObject(name)
         if obj is None:
             continue
@@ -676,7 +676,7 @@ def build(doc, only=None):
         remove_old(doc, [only])
         doc.recompute()
     else:
-        remove_old(doc, names + legacy)
+        remove_old(doc, ["Layout"] + names + legacy + ["Board", "Params"])
         sheet = build_sheet(doc, contents)
         layout = doc.addObject("App::DocumentObjectGroup", "Layout")
     bodies = []
