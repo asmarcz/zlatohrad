@@ -50,6 +50,10 @@ PARAMS = [
     ("Fit", "0.2", "clearance around the dovetail in the socket"),
     ("OctH", "=Pitch / 2 - PadSize / 2", "hole centre to the flats facing the pads"),
     ("OctC", "=PadSize / 2 - Bar / sqrt(2)", "half length of those flats"),
+    ("RidgeH", "0.6", "height of the ridges on the diagonal bars; a card rests and tips on them"),
+    ("RidgeW", "2.4", "ridge width at its foot"),
+    ("RidgeLen", "=(OctH - OctC) * sqrt(2) - 2", "ridge length, end to end"),
+    ("RidgeTaper", "40", "slope of the ridge sides and ends, degrees from vertical"),
 ]
 ALIASES = [a for a, _, _ in PARAMS]
 NAME = re.compile(r"\b(" + "|".join(ALIASES) + r")\b")
@@ -192,6 +196,41 @@ def rib_end_cut(sketch, end, sign):
     fix(sketch, "DistanceX", arc, 3, centre)
     fix(sketch, "DistanceY", arc, 3, base)
     sketch.addConstraint(Sketcher.Constraint("Vertical", up))
+
+
+def ridge_foot(sketch, mx, my):
+    """Footprint of one ridge: a pill along the diagonal bar whose middle is at
+    (mx, my) quarter tiles. Bars between a tile-corner hole and a tile-centre
+    hole run along (1, 1) or (1, -1); which one follows from the position."""
+    s = 1 if ((mx + my) // 2) % 2 == 0 else -1
+    M = (f"{mx / 4:g} * Pitch", f"{my / 4:g} * Pitch")
+    a = "(RidgeLen - RidgeW) / 2 / sqrt(2)"  # middle to each end's arc centre, per axis
+    b = "RidgeW / 2 / sqrt(2)"  # arc centre to the side lines, per axis
+    r = "RidgeW / 2"
+    # Arc centres one each way along the bar; side lines offset across it.
+    c1 = (add(M[0], a), add(M[1], a if s > 0 else neg(a)))
+    c2 = (sub(M[0], a), sub(M[1], a if s > 0 else neg(a)))
+    nx, ny = (neg(b), b) if s > 0 else (b, b)  # across the bar
+
+    def off(c, k):
+        return (add(c[0], nx) if k > 0 else sub(c[0], nx), add(c[1], ny) if k > 0 else sub(c[1], ny))
+
+    p = lambda q: V(num(q[0]), num(q[1]), 0)
+    theta = math.atan2(num(ny), num(nx))
+    g = len(sketch.Geometry)
+    sketch.addGeometry(Part.LineSegment(p(off(c2, 1)), p(off(c1, 1))))
+    sketch.addGeometry(Part.ArcOfCircle(Part.Circle(p(c1), V(0, 0, 1), num(r)), theta - math.pi, theta))
+    sketch.addGeometry(Part.LineSegment(p(off(c1, -1)), p(off(c2, -1))))
+    sketch.addGeometry(Part.ArcOfCircle(Part.Circle(p(c2), V(0, 0, 1), num(r)), theta, theta + math.pi))
+    side1, end1, side2, end2 = g, g + 1, g + 2, g + 3
+    for a_, pa, b_, pb in ((side1, 2, end1, 2), (end1, 1, side2, 1),
+                           (side2, 2, end2, 2), (end2, 1, side1, 1)):  # fmt: skip
+        sketch.addConstraint(Sketcher.Constraint("Tangent", a_, pa, b_, pb))
+    for arc, c in ((end1, c1), (end2, c2)):
+        fix(sketch, "DistanceX", arc, 3, c[0])
+        fix(sketch, "DistanceY", arc, 3, c[1])
+        i = sketch.addConstraint(Sketcher.Constraint("Radius", arc, num(r)))
+        sketch.setExpression(f".Constraints[{i}]", expr(r))
 
 
 def tab_points(along):
@@ -489,6 +528,16 @@ def build_piece(doc, p, tag):
         for (_, sign), e in sorted(ends.items()):
             rib_end_cut(s, e, sign)
         pocket(f"{axis.upper()}RibEnds", s, both_ways=True)
+
+    # Ridges along the middle of every diagonal bar, so a card rests on them and
+    # tips when pressed near an edge, lifting the opposite edge to grab. They
+    # come after the rib cuts, which run through everything above the board.
+    s = sketch("Ridges", offset="Thickness")
+    for mx in range(2 * p.x0 + 1, 2 * p.x1, 2):
+        for my in range(2 * p.y0 + 1, 2 * p.y1, 2):
+            ridge_foot(s, mx, my)
+    f = pad("Ridges", s, "Params.RidgeH")
+    f.setExpression("TaperAngle", "-Params.RidgeTaper")
 
     sockets = [placed(s, c, socket_points, False) for s, c, t in conns if not t]
     if sockets:
