@@ -383,17 +383,21 @@ def remove_old(doc, names):
         obj = doc.getObject(name)
         if obj is None:
             continue
+        # Delete members one by one: removeObjectsFromDocument() also takes
+        # objects they depend on, which deleted the Params sheet.
         if obj.TypeId == "PartDesign::Body":
+            members = [o.Name for o in obj.Group]
             origin = [obj.Origin.Name] + [f.Name for f in obj.Origin.OriginFeatures]
-            obj.removeObjectsFromDocument()
             doc.removeObject(obj.Name)
-            for n in origin:
+            for n in members + origin:
                 if doc.getObject(n):
                     doc.removeObject(n)
         else:
-            if obj.TypeId == "App::DocumentObjectGroup":
-                obj.removeObjectsFromDocument()
+            members = [o.Name for o in getattr(obj, "Group", [])]
             doc.removeObject(obj.Name)
+            for n in members:
+                if doc.getObject(n):
+                    doc.removeObject(n)
 
 
 def build_sheet(doc, contents):
