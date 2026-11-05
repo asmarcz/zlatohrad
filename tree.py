@@ -343,11 +343,28 @@ def rect(x0, y0, x1, y1):
 
 
 class Piece:
-    def __init__(self, x0, x1, y0, y1):
+    def __init__(self, x0, x1, y0, y1, pads=None):
+        """A piece spanning [x0, x1] x [y0, y1] half tiles. `pads` optionally lists
+        the only seam pads that get a connector, as {(side, c): is_tab}; all
+        other seam pads are then plainly split. Without it the board rule
+        (tab_here) decides every seam pad."""
         self.x0, self.x1, self.y0, self.y1 = x0, x1, y0, y1
         self.term = {
             "L": x0 == 0, "R": x1 == SIZE, "B": y0 == 0, "T": y1 == SIZE,
         }  # fmt: skip
+        self.pads = pads
+
+    def seam_pad(self, side, c):
+        """'tab', 'socket' or 'split' for the seam pad at position c on a side."""
+        if self.pads is not None:
+            if (side, c) not in self.pads:
+                return "split"
+            return "tab" if self.pads[(side, c)] else "socket"
+        lo, hi = (self.y0, self.y1) if side in "RL" else (self.x0, self.x1)
+        if c in (lo, hi):
+            return "split"  # where the seam meets the board's outer edge
+        axis = "x" if side in "RL" else "y"
+        return "tab" if tab_here(axis, side in "RT", c) else "socket"
 
     def kind(self):
         n = sum(self.term.values())
@@ -394,14 +411,16 @@ def ribs(p):
                 on_lo, on_hi = a == lo, a == hi
                 if on_lo or on_hi:
                     # A pad on a connector seam.
-                    if c in (clo, chi):
-                        # Where the seam meets the board's outer edge: no
-                        # connector, the rib just stops at the seam.
+                    side = ("R" if on_hi else "L") if axis == "x" else ("T" if on_hi else "B")
+                    kind = p.seam_pad(side, c)
+                    if kind == "split":
+                        # No connector: the pad is just split between the two
+                        # pieces, and the rib stops at the seam.
                         if on_hi:
                             end, round_end = at(a), False
                         else:
                             start, round_start = at(a), False
-                    elif not tab_here(axis, on_hi, c):
+                    elif kind == "socket":
                         continue  # the neighbour's tab brings this rib
                     # Over a tab the rib runs out towards the round tip, stopping
                     # where the head gets narrower than the rib, so its corners
@@ -449,9 +468,8 @@ def connectors(p):
         if p.term[side]:
             continue
         for c in range(lo + 1, hi):
-            if c % 2 == 0:
-                axis = "x" if side in "RL" else "y"
-                out.append((side, c, tab_here(axis, side in "RT", c)))
+            if c % 2 == 0 and p.seam_pad(side, c) != "split":
+                out.append((side, c, p.seam_pad(side, c) == "tab"))
     return out
 
 
@@ -717,7 +735,7 @@ def build(doc, only=None):
     sheet, layout = doc.getObject("Params"), doc.getObject("Layout")
     if only and sheet and layout:
         # Rebuild one design and its copies; the sheet and the other pieces stay.
-        assert only in names, (only, names)
+        assert only in names + [TEST], (only, names)
         for row, (alias, _, note) in enumerate(PARAMS, start=1):
             if alias not in existing:  # a parameter added since the last full build
                 r = sheet.getUsedRange()[1]
@@ -732,7 +750,7 @@ def build(doc, only=None):
         remove_old(doc, [only])
         doc.recompute()
     else:
-        remove_old(doc, ["Layout"] + names + legacy + ["Board", "Params"])
+        remove_old(doc, ["Layout"] + names + [TEST] + legacy + ["Board", "Params"])
         sheet = build_sheet(doc, contents)
         layout = doc.addObject("App::DocumentObjectGroup", "Layout")
     bodies = []
@@ -755,7 +773,21 @@ def build(doc, only=None):
             link.setExpression(".Placement.Base.x", f"{dx:g} * Params.Pitch")
             link.setExpression(".Placement.Base.y", f"{dy:g} * Params.Pitch")
             layout.addObject(link)
+    if not only or only == TEST:
+        bodies.append(build_piece(doc, test_piece(), TEST))
     return sheet, bodies, layout
+
+
+TEST = "Test"
+
+
+def test_piece():
+    """A print to try the fit before printing the board: the smallest piece that
+    holds one whole tile (half a tile on each side of it, like Centre), with a
+    single tab on its right seam and a single socket on its left seam at the
+    same height, every other seam pad plainly split. Two prints side by side
+    join. It sits just left of the board."""
+    return Piece(-9, -5, 1, 5, pads={("R", 2): True, ("L", 2): False})
 
 
 kept = {}  # values taken over from the existing sheet that differ from the defaults
