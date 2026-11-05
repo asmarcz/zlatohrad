@@ -620,7 +620,7 @@ def build_piece(doc, p, tag):
     return body
 
 
-def build(doc):
+def build(doc, only=None):
     pieces = [
         Piece(COLS[i], COLS[i + 1], ROWS[j], ROWS[j + 1])
         for j in range(len(ROWS) - 1)
@@ -657,13 +657,33 @@ def build(doc):
     contents = {a: existing.get(a, v) for a, v in defaults.items()}
     set_values(contents)
     kept.update({a: c for a, c in contents.items() if c != defaults[a]})
-    remove_old(doc, names + legacy)
 
-    sheet = build_sheet(doc, contents)
-    layout = doc.addObject("App::DocumentObjectGroup", "Layout")
+    sheet, layout = doc.getObject("Params"), doc.getObject("Layout")
+    if only and sheet and layout:
+        # Rebuild one design and its copies; the sheet and the other pieces stay.
+        assert only in names, (only, names)
+        for row, (alias, _, note) in enumerate(PARAMS, start=1):
+            if alias not in existing:  # a parameter added since the last full build
+                r = sheet.getUsedRange()[1]
+                last = int(re.sub(r"\D", "", r)) + 1
+                sheet.set(f"A{last}", alias)
+                sheet.set(f"B{last}", contents[alias])
+                sheet.setAlias(f"B{last}", alias)
+                sheet.set(f"C{last}", note)
+        for o in list(layout.Group):
+            if o.Name.startswith(only + "_"):
+                doc.removeObject(o.Name)
+        remove_old(doc, [only])
+        doc.recompute()
+    else:
+        remove_old(doc, names + legacy)
+        sheet = build_sheet(doc, contents)
+        layout = doc.addObject("App::DocumentObjectGroup", "Layout")
     bodies = []
     centre = SIZE / 4  # board centre, in tiles
     for name, (first, members) in zip(names, designs):
+        if only and name != only:
+            continue
         body = build_piece(doc, first, name)
         bodies.append(body)
         for n, (p, k, t) in enumerate(members[1:], start=2):
@@ -683,8 +703,12 @@ def build(doc):
 
 
 kept = {}  # values taken over from the existing sheet that differ from the defaults
+# Set ONLY = "Centre" (or another design name) before running this file to
+# rebuild just that design and its copies, which is much faster:
+#   fc.py run -c 'ONLY = "Centre"; exec(open("tree.py").read())'
+only = globals().pop("ONLY", None)  # popped so it doesn't stick to later runs
 doc = App.ActiveDocument
-sheet, bodies, layout = build(doc)
+sheet, bodies, layout = build(doc, only)
 start = time.time()
 doc.recompute()
 elapsed = time.time() - start
