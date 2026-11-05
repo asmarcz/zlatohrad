@@ -44,9 +44,9 @@ PARAMS = [
     ("PadSize", "20", "side of the square pads under the tile edges"),
     ("Bar", "5.5", "width of the diagonal bars"),
     ("Border", "5", "solid strip along the board's outer edges"),
-    ("TabBase", "10", "dovetail width at the piece edge"),
-    ("TabEnd", "13", "dovetail width at its tip"),
-    ("TabLen", "=PadSize / 2", "dovetail length: fills the neighbour's half pad"),
+    ("KnobNeck", "5", "width of the jigsaw tab's neck at the piece edge"),
+    ("KnobHead", "9", "diameter of the jigsaw tab's round head"),
+    ("KnobReach", "=PadSize / 2 - 1", "how far the tab reaches into the neighbour; the rest is the socket's back wall"),
     ("Fit", "0.2", "clearance around the dovetail in the socket"),
     ("OctH", "=Pitch / 2 - PadSize / 2", "hole centre to the flats facing the pads"),
     ("OctC", "=PadSize / 2 - Bar / sqrt(2)", "half length of those flats"),
@@ -280,25 +280,52 @@ def ridge_top_cut(sketch):
     sketch.addConstraint(Sketcher.Constraint("Horizontal", in_l))
 
 
-def tab_points(along):
-    """Dovetail sticking out of the piece. `along` maps the outward distance and
-    the sideways offset to (x, y) expression strings."""
-    a, b, L = "TabBase / 2", "TabEnd / 2", "TabLen"
-    local = [("-0.5", a), ("0", a), (L, b), (L, neg(b)), ("0", neg(a)), ("-0.5", neg(a))]
-    return [along(u, v) for u, v in local]
-
-
-def socket_points(along):
-    """Socket into the piece, Fit wider than the tab on each side, running through
-    the half pad into the next hole. `along` maps the inward distance."""
-    # At depth L the socket is wider than the hole's flat there, so the flared
-    # walls carry on 2 mm into the hole; stopping at L would notch the bars.
-    a, b, L = "TabBase / 2 + Fit", "TabEnd / 2 + Fit", "TabLen"
-    deep = add(L, "2")
-    b_deep = f"{a} + ({b} - ({a})) * ({deep}) / ({L})"
-    local = [("-1", a), ("0", a), (deep, b_deep),
-             (deep, neg(b_deep)), ("0", neg(a)), ("-1", neg(a))]  # fmt: skip
-    return [along(u, v) for u, v in local]
+def knob(sketch, along, fit, inner):
+    """Jigsaw knob: a neck of width KnobNeck from the piece edge into a round
+    head of diameter KnobHead whose tip is KnobReach from the edge. `along` maps
+    (u, v) = (distance across the edge, offset along it) to (x, y) expressions;
+    `fit` widens everything by that much on each side (for the socket); the
+    neck starts `inner` behind the edge so the shape overlaps what it joins."""
+    a = f"KnobNeck / 2 + {fit}"
+    r = f"KnobHead / 2 + {fit}"
+    c = "KnobReach - KnobHead / 2"  # head centre, distance from the edge
+    u1 = f"{c} - sqrt(({r}) * ({r}) - ({a}) * ({a}))"  # where the neck meets the head
+    pa, pb = along(neg(inner), a), along(neg(inner), neg(a))
+    pt, pbot = along(u1, a), along(u1, neg(a))
+    tip, centre = along(add(c, r), "0"), along(c, "0")
+    p = lambda q: V(num(q[0]), num(q[1]), 0)
+    g = len(sketch.Geometry)
+    sketch.addGeometry(Part.LineSegment(p(pa), p(pt)))
+    # Sketcher arcs run anticlockwise; pick the start so the arc passes the tip.
+    cv = p(centre)
+    ang = lambda q: math.atan2(num(q[1]) - cv.y, num(q[0]) - cv.x)
+    tb, tt, tp = ang(pbot), ang(pt), ang(tip)
+    ccw = lambda a, b: (b - a) % (2 * math.pi)
+    a0, a1 = (tb, tt) if ccw(tb, tp) < ccw(tb, tt) else (tt, tb)
+    a1 = a0 + ccw(a0, a1)
+    sketch.addGeometry(Part.ArcOfCircle(Part.Circle(cv, V(0, 0, 1), num(r)), a0, a1))
+    sketch.addGeometry(Part.LineSegment(p(pbot), p(pb)))
+    sketch.addGeometry(Part.LineSegment(p(pb), p(pa)))
+    top, head, bottom, back = g, g + 1, g + 2, g + 3
+    # Sketcher keeps arcs anticlockwise, so either end may be the start.
+    stored = sketch.Geometry[head]
+    at_top = 1 if (stored.StartPoint - p(pt)).Length < 1e-6 else 2
+    at_bot = 3 - at_top
+    for x, pa_, y, pb_ in ((top, 2, head, at_top), (head, at_bot, bottom, 1),
+                           (bottom, 2, back, 1), (back, 2, top, 1)):  # fmt: skip
+        sketch.addConstraint(Sketcher.Constraint("Coincident", x, pa_, y, pb_))
+    for geo, q in ((top, pa), (bottom, pb)):
+        pos = 1 if geo == top else 2
+        fix(sketch, "DistanceX", geo, pos, q[0])
+        fix(sketch, "DistanceY", geo, pos, q[1])
+    fix(sketch, "DistanceX", head, 3, centre[0])
+    fix(sketch, "DistanceY", head, 3, centre[1])
+    i = sketch.addConstraint(Sketcher.Constraint("Radius", head, num(r)))
+    sketch.setExpression(f".Constraints[{i}]", expr(r))
+    # The neck sides run straight across the edge until they meet the head.
+    straight = "Horizontal" if abs(num(pa[1]) - num(pt[1])) < 1e-6 else "Vertical"
+    sketch.addConstraint(Sketcher.Constraint(straight, top))
+    sketch.addConstraint(Sketcher.Constraint(straight, bottom))
 
 
 def octagon_points(cx, cy):
@@ -342,6 +369,10 @@ class Piece:
         return (self.x1 - self.x0, self.y1 - self.y0, terms, frozenset(pads))
 
 
+# Distance from the piece edge to where the knob's head is exactly RibW wide.
+RIB_ON_KNOB = "KnobReach - KnobHead / 2 + sqrt(KnobHead * KnobHead / 4 - RibW * RibW / 4)"
+
+
 def ribs(p):
     """Every rib on a piece: (axis, centre across, start along, end along, rounded
     start, rounded end), all in half tiles except the ends, which are expressions.
@@ -372,6 +403,13 @@ def ribs(p):
                             start, round_start = at(a), False
                     elif not tab_here(axis, on_hi, c):
                         continue  # the neighbour's tab brings this rib
+                    # Over a tab the rib runs out towards the round tip, stopping
+                    # where the head gets narrower than the rib, so its corners
+                    # don't stick out past the tab into the socket's clearance.
+                    elif on_hi:
+                        end = add(at(a), RIB_ON_KNOB)
+                    else:
+                        start = sub(at(a), RIB_ON_KNOB)
                 out.append((axis, c, start, end, round_start, round_end))
     return out
 
@@ -505,20 +543,22 @@ def build_piece(doc, p, tag):
 
     conns = connectors(p)
 
-    def placed(side, c, points_fn, outward):
+    def edge_frame(side, c, outward):
         # Map (u, v) = (distance across the edge, offset along it) to (x, y).
         # outward=True: u points out of the piece (tabs), else into it (sockets).
         X = {"R": X1, "L": X0}.get(side)
         Y = {"T": Y1, "B": Y0}.get(side)
-        sign_out = side in "RT"
-        step = add if sign_out == outward else sub
+        step = add if (side in "RT") == outward else sub
         if side in "RL":
-            return points_fn(lambda u, v: (step(X, u), add(at(c), v)))
-        return points_fn(lambda u, v: (add(at(c), v), step(Y, u)))
+            return lambda u, v: (step(X, u), add(at(c), v))
+        return lambda u, v: (add(at(c), v), step(Y, u))
 
-    tabs = [placed(s, c, tab_points, True) for s, c, t in conns if t]
-    if tabs:
-        pad("Tabs", sketch("Tabs", tabs))
+    if any(t for _, _, t in conns):
+        s = sketch("Tabs")
+        for side, c, t in conns:
+            if t:
+                knob(s, edge_frame(side, c, True), "0", "0.5")
+        pad("Tabs", s)
 
     # Holes: one octagon on the tile-corner lattice and one on the tile-centre
     # lattice, each repeated over the piece.
@@ -606,7 +646,6 @@ def build_piece(doc, p, tag):
         sgn = 1 if ((mx + my) // 2) % 2 == 0 else -1
         # The cut's sketch stands upright across the ridge: sketch x across it,
         # sketch y up, its normal along the ridge.
-        along = V(1, sgn, 0).normalize()
         across = V(-sgn, 1, 0).normalize()
         normal = across.cross(V(0, 0, 1))
         rot = App.Rotation(App.Matrix(across.x, 0, normal.x, 0,
@@ -627,9 +666,12 @@ def build_piece(doc, p, tag):
         cut.setExpression("Length", "Params.RidgeLen + 1")
         grid(name + "s", cut, len(xs), len(ys))
 
-    sockets = [placed(s, c, socket_points, False) for s, c, t in conns if not t]
-    if sockets:
-        pocket("Sockets", sketch("Sockets", sockets, offset="Thickness"), both_ways=True)
+    if any(not t for _, _, t in conns):
+        s = sketch("Sockets", offset="Thickness")
+        for side, c, t in conns:
+            if not t:
+                knob(s, edge_frame(side, c, False), "Fit", "1")
+        pocket("Sockets", s, both_ways=True)
     body.Tip.Refine = True
     return body
 
