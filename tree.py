@@ -233,6 +233,40 @@ def ridge_foot(sketch, mx, my):
         sketch.setExpression(f".Constraints[{i}]", expr(r))
 
 
+def ridge_top_cut(sketch):
+    """Cross-section of what to cut off a ridge so its top is a low circular hill
+    from foot to foot, drawn around sketch x = 0 (the ridge's middle line), with
+    sketch y as height. Everything over the arc within the ridge is removed."""
+    w, h, base = "RidgeW / 2", "RidgeH", "Thickness"
+    radius = f"(({w}) * ({w}) + {h} * {h}) / (2 * {h})"
+    cz = f"{base} + {h} - ({radius})"  # arc centre height
+    out, top = add(w, "1"), f"{base} + {h} + 1"
+    p = lambda x, y: V(num(x), num(y), 0)
+    pts = [(neg(out), base), (neg(out), top), (out, top), (out, base)]
+    g = len(sketch.Geometry)
+    for k in range(3):
+        sketch.addGeometry(Part.LineSegment(p(*pts[k]), p(*pts[k + 1])))
+    sketch.addGeometry(Part.LineSegment(p(*pts[3]), p(w, base)))
+    r, c = num(radius), num(cz)
+    foot = math.atan2(num(base) - c, num(w))  # angle of the right foot seen from the centre
+    sketch.addGeometry(Part.ArcOfCircle(Part.Circle(p("0", cz), V(0, 0, 1), r), foot, math.pi - foot))
+    sketch.addGeometry(Part.LineSegment(p(neg(w), base), p(*pts[0])))
+    up, over, down, in_r, arc, in_l = range(g, g + 6)
+    for a, pa, b, pb in ((in_l, 2, up, 1), (up, 2, over, 1), (over, 2, down, 1),
+                         (down, 2, in_r, 1), (in_r, 2, arc, 1), (arc, 2, in_l, 1)):  # fmt: skip
+        sketch.addConstraint(Sketcher.Constraint("Coincident", a, pa, b, pb))
+    for geo, (x, y) in zip((up, over, down, in_r), pts):
+        fix(sketch, "DistanceX", geo, 1, x)
+        fix(sketch, "DistanceY", geo, 1, y)
+    fix(sketch, "DistanceX", arc, 3, "0")
+    fix(sketch, "DistanceY", arc, 3, cz)
+    i = sketch.addConstraint(Sketcher.Constraint("Radius", arc, r))
+    sketch.setExpression(f".Constraints[{i}]", expr(radius))
+    # The arc meets the board at the ridge's feet.
+    sketch.addConstraint(Sketcher.Constraint("Horizontal", in_r))
+    sketch.addConstraint(Sketcher.Constraint("Horizontal", in_l))
+
+
 def tab_points(along):
     """Dovetail sticking out of the piece. `along` maps the outward distance and
     the sideways offset to (x, y) expression strings."""
@@ -542,6 +576,42 @@ def build_piece(doc, p, tag):
             ridge_foot(s, mx, my)
     f = pad("Ridges", s, "Params.RidgeH")
     f.setExpression("TaperAngle", "-Params.RidgeTaper")
+
+    # Round the ridge tops into hills: one cut per ridge, as long as the ridge,
+    # so it can't reach the separator ribs further along the same diagonal.
+    # Ridges of one direction repeat every pitch in x and y from two starting
+    # points, so four cuts with grid patterns cover them all.
+    mids = [(mx, my) for mx in range(2 * p.x0 + 1, 2 * p.x1, 2)
+            for my in range(2 * p.y0 + 1, 2 * p.y1, 2)]  # fmt: skip
+    groups = {}
+    for mx, my in mids:
+        groups.setdefault((mx % 4, my % 4), []).append((mx, my))
+    for (gx, gy), members in sorted(groups.items()):
+        xs = sorted({m[0] for m in members})
+        ys = sorted({m[1] for m in members})
+        mx, my = xs[0], ys[0]
+        sgn = 1 if ((mx + my) // 2) % 2 == 0 else -1
+        # The cut's sketch stands upright across the ridge: sketch x across it,
+        # sketch y up, its normal along the ridge.
+        along = V(1, sgn, 0).normalize()
+        across = V(-sgn, 1, 0).normalize()
+        normal = across.cross(V(0, 0, 1))
+        rot = App.Rotation(App.Matrix(across.x, 0, normal.x, 0,
+                                      across.y, 0, normal.y, 0,
+                                      0, 1, normal.z, 0, 0, 0, 0, 1))  # fmt: skip
+        name = f"RidgeTop{gx}{gy}"
+        s = body.newObject("Sketcher::SketchObject", f"{tag}_{name}Sketch")
+        s.MapMode = "Deactivated"
+        s.Placement = App.Placement(V(num(at(mx / 2)), num(at(my / 2)), 0), rot)
+        s.setExpression(".Placement.Base.x", expr(at(mx / 2)))
+        s.setExpression(".Placement.Base.y", expr(at(my / 2)))
+        ridge_top_cut(s)
+        cut = body.newObject("PartDesign::Pocket", f"{tag}_{name}")
+        cut.Profile = s
+        cut.Type = "Length"
+        cut.Midplane = True
+        cut.setExpression("Length", "Params.RidgeLen + 1")
+        grid(name + "s", cut, len(xs), len(ys))
 
     sockets = [placed(s, c, socket_points, False) for s, c, t in conns if not t]
     if sockets:
