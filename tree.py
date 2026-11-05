@@ -785,23 +785,26 @@ COUPONS = ["TestFemale", "TestFemaleBox", "TestMale", "TestMaleBox"]
 
 
 def build_coupons(doc, test):
-    """Two tiny prints for trying the connector: the test piece's socket pad and
-    its tab, each cut out of the test piece with a little of the bars around."""
-    # Test piece seams: left x = -4.5 pitch (socket), right x = -2.5 pitch (tab),
-    # both connectors at y = 1 pitch.
-    margin = 3  # mm of bar stubs kept around the pad
-    boxes = {
-        "TestFemale": ("-4.5 * Params.Pitch - 1", f"Params.PadSize / 2 + {margin + 1}"),
-        "TestMale": (f"-2.5 * Params.Pitch - Params.PadSize / 2 - {margin}",
-                     f"Params.PadSize / 2 + {margin} + Params.KnobReach + 1"),
+    """Two small prints cut out of the test piece:
+    TestFemale holds one card (the test piece's whole tile, its four pads with
+    their ribs, and the ridges under it) plus the socket pad next to it;
+    TestMale is just the tab, with its half pad and a little of the bars."""
+    # Test piece: whole tile at x -4..-3, y 1..2 pitch; left seam x = -4.5 pitch
+    # (socket), right seam x = -2.5 pitch (tab), both connectors at y = 1 pitch.
+    P, half = "Params.Pitch", "Params.PadSize / 2"
+    margin = 3  # mm of bar stubs kept around the tab's pad
+    boxes = {  # x0, x1, y0, y1
+        "TestFemale": (f"-4.5 * {P} - 1", f"-3 * {P} + {half}", f"{P} - {half}", f"2 * {P} + {half}"),
+        "TestMale": (f"-2.5 * {P} - {half} - {margin}", f"-2.5 * {P} + Params.KnobReach + 1",
+                     f"{P} - {half} - {margin}", f"{P} + {half} + {margin}"),
     }  # fmt: skip
-    for name, (x, length) in boxes.items():
+    for name, (x0, x1, y0, y1) in boxes.items():
         box = doc.addObject("Part::Box", name + "Box")
-        box.setExpression("Length", length)
-        box.setExpression("Width", f"Params.PadSize + {2 * margin}")
+        box.setExpression("Length", f"({x1}) - ({x0})")
+        box.setExpression("Width", f"({y1}) - ({y0})")
         box.setExpression("Height", "Params.Thickness + Params.RibH + 2")
-        box.setExpression(".Placement.Base.x", x)
-        box.setExpression(".Placement.Base.y", f"Params.Pitch - Params.PadSize / 2 - {margin}")
+        box.setExpression(".Placement.Base.x", x0)
+        box.setExpression(".Placement.Base.y", y0)
         box.Placement.Base.z = -1
         cut = doc.addObject("Part::MultiCommon", name)
         cut.Shapes = [test, box]
