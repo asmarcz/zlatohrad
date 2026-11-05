@@ -198,12 +198,25 @@ def rib_end_cut(sketch, end, sign):
     sketch.addConstraint(Sketcher.Constraint("Vertical", up))
 
 
+def ridge_mid(mx, my):
+    """Middle of the ridge on the diagonal bar centred at (mx, my) quarter tiles.
+    The ridge sits on the bar's outer edge, the one facing the tile-corner hole
+    (away from the card's centre), so its foot is flush with that edge."""
+    # The nearest tile corner is the nearest multiple of 4 quarters on each axis.
+    sx = 1 if mx % 4 == 3 else -1
+    sy = 1 if my % 4 == 3 else -1
+    shift = "(Bar / 2 - RidgeW / 2) / sqrt(2)"
+    x, y = f"{mx / 4:g} * Pitch", f"{my / 4:g} * Pitch"
+    return (add(x, shift) if sx > 0 else sub(x, shift),
+            add(y, shift) if sy > 0 else sub(y, shift))
+
+
 def ridge_foot(sketch, mx, my):
-    """Footprint of one ridge: a pill along the diagonal bar whose middle is at
-    (mx, my) quarter tiles. Bars between a tile-corner hole and a tile-centre
-    hole run along (1, 1) or (1, -1); which one follows from the position."""
+    """Footprint of one ridge: a pill along the diagonal bar centred at (mx, my)
+    quarter tiles. Bars between a tile-corner hole and a tile-centre hole run
+    along (1, 1) or (1, -1); which one follows from the position."""
     s = 1 if ((mx + my) // 2) % 2 == 0 else -1
-    M = (f"{mx / 4:g} * Pitch", f"{my / 4:g} * Pitch")
+    M = ridge_mid(mx, my)
     a = "(RidgeLen - RidgeW) / 2 / sqrt(2)"  # middle to each end's arc centre, per axis
     b = "RidgeW / 2 / sqrt(2)"  # arc centre to the side lines, per axis
     r = "RidgeW / 2"
@@ -602,9 +615,10 @@ def build_piece(doc, p, tag):
         name = f"RidgeTop{gx}{gy}"
         s = body.newObject("Sketcher::SketchObject", f"{tag}_{name}Sketch")
         s.MapMode = "Deactivated"
-        s.Placement = App.Placement(V(num(at(mx / 2)), num(at(my / 2)), 0), rot)
-        s.setExpression(".Placement.Base.x", expr(at(mx / 2)))
-        s.setExpression(".Placement.Base.y", expr(at(my / 2)))
+        mid = ridge_mid(mx, my)
+        s.Placement = App.Placement(V(num(mid[0]), num(mid[1]), 0), rot)
+        s.setExpression(".Placement.Base.x", expr(mid[0]))
+        s.setExpression(".Placement.Base.y", expr(mid[1]))
         ridge_top_cut(s)
         cut = body.newObject("PartDesign::Pocket", f"{tag}_{name}")
         cut.Profile = s
