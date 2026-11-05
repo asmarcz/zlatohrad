@@ -747,10 +747,10 @@ def build(doc, only=None):
         for o in list(layout.Group):
             if o.Name.startswith(only + "_"):
                 doc.removeObject(o.Name)
-        remove_old(doc, [only])
+        remove_old(doc, (COUPONS if only == TEST else []) + [only])
         doc.recompute()
     else:
-        remove_old(doc, ["Layout"] + names + [TEST] + legacy + ["Board", "Params"])
+        remove_old(doc, ["Layout"] + names + COUPONS + [TEST] + legacy + ["Board", "Params"])
         sheet = build_sheet(doc, contents)
         layout = doc.addObject("App::DocumentObjectGroup", "Layout")
     bodies = []
@@ -774,11 +774,38 @@ def build(doc, only=None):
             link.setExpression(".Placement.Base.y", f"{dy:g} * Params.Pitch")
             layout.addObject(link)
     if not only or only == TEST:
-        bodies.append(build_piece(doc, test_piece(), TEST))
+        test = build_piece(doc, test_piece(), TEST)
+        bodies.append(test)
+        build_coupons(doc, test)
     return sheet, bodies, layout
 
 
 TEST = "Test"
+COUPONS = ["TestFemale", "TestFemaleBox", "TestMale", "TestMaleBox"]
+
+
+def build_coupons(doc, test):
+    """Two tiny prints for trying the connector: the test piece's socket pad and
+    its tab, each cut out of the test piece with a little of the bars around."""
+    # Test piece seams: left x = -4.5 pitch (socket), right x = -2.5 pitch (tab),
+    # both connectors at y = 1 pitch.
+    margin = 3  # mm of bar stubs kept around the pad
+    boxes = {
+        "TestFemale": ("-4.5 * Params.Pitch - 1", f"Params.PadSize / 2 + {margin + 1}"),
+        "TestMale": (f"-2.5 * Params.Pitch - Params.PadSize / 2 - {margin}",
+                     f"Params.PadSize / 2 + {margin} + Params.KnobReach + 1"),
+    }  # fmt: skip
+    for name, (x, length) in boxes.items():
+        box = doc.addObject("Part::Box", name + "Box")
+        box.setExpression("Length", length)
+        box.setExpression("Width", f"Params.PadSize + {2 * margin}")
+        box.setExpression("Height", "Params.Thickness + Params.RibH + 2")
+        box.setExpression(".Placement.Base.x", x)
+        box.setExpression(".Placement.Base.y", f"Params.Pitch - Params.PadSize / 2 - {margin}")
+        box.Placement.Base.z = -1
+        cut = doc.addObject("Part::MultiCommon", name)
+        cut.Shapes = [test, box]
+        cut.Refine = True
 
 
 def test_piece():
